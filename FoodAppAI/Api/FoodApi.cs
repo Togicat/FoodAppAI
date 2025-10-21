@@ -1,68 +1,65 @@
 using System;
 using System.Net.Http;
+using System.Net.Http.Headers;
+using System.Text;
+using System.Text.Json;
 using System.Threading.Tasks;
-using Newtonsoft.Json.Linq;
 
 namespace FoodAppAI.Api
 {
     public class FoodApi
     {
-        private readonly HttpClient _httpClient = new HttpClient();
-        private readonly string _appId;
-        private readonly string _appKey;
+        private readonly string _clientId = "9798d3eba2ff4f9e9d4cf5e449918449"; // consumer key
+        private readonly string _clientSecret = "b3cb78091581438485bb92a5bca3ca96"; // consumer secret
+        private readonly HttpClient _httpClient;
 
-        public FoodApi(string appId, string appKey)
+        public FoodApi()
         {
-            _appId = appId;
-            _appKey = appKey;
+            _httpClient = new HttpClient();
         }
 
-        /// <summary>
-        /// Vrátí surový JSON string z Edamam pro daný ingredienci/jídlo.
-        /// </summary>
-        public async Task<string> GetFoodDataRawAsync(string foodName)
+        
+        private async Task<string> GetAccessTokenAsync()
         {
-            // endpoint Edamam Food (Food Database API)
-            // Dokumentace Edamam: https://developer.edamam.com/edamam-docs-food-database-api  
-            // Použij parametr "ingr" pro hledání
-            string url = $"https://api.edamam.com/api/food-database/v2/parser?app_id={_appId}&app_key={_appKey}&ingr={Uri.EscapeDataString(foodName)}";
-            
-            var response = await _httpClient.GetAsync(url);
-            response.EnsureSuccessStatusCode();
-            string content = await response.Content.ReadAsStringAsync();
-            return content;
-        }
+            var tokenUrl = "https://oauth.fatsecret.com/connect/token";
 
-        /// <summary>
-        /// Parse JSON z Edamam a vrátí instanci FoodInfo (první nalezený záznam).
-        /// </summary>
-        public FoodAppAI.Models.FoodInfo ParseFoodInfo(string rawJson)
-        {
-            var j = JObject.Parse(rawJson);
+            var clientCredentials = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{_clientId}:{_clientSecret}"));
+            var request = new HttpRequestMessage(HttpMethod.Post, tokenUrl);
 
-            // Edamam parser vrací objekty "hints" – seznam možných potravin
-            var hints = j["hints"];
-            if (hints != null && hints.HasValues)
+            request.Headers.Authorization = new AuthenticationHeaderValue("Basic", clientCredentials);
+            request.Content = new StringContent("grant_type=client_credentials&scope=basic", Encoding.UTF8, "application/x-www-form-urlencoded");
+
+            var response = await _httpClient.SendAsync(request);
+
+            if (!response.IsSuccessStatusCode)
             {
-                var first = hints[0];
-                var food = first["food"];
-                var nutrients = first["food"]?["nutrients"];
-                if (food != null && nutrients != null)
-                {
-                    var info = new FoodAppAI.Models.FoodInfo
-                    {
-                        Label = (string)food["label"],
-                        Calories = (double?)(nutrients["ENERC_KCAL"] ?? 0) ?? 0,
-                        Fat = (double?)(nutrients["FAT"] ?? 0) ?? 0,
-                        Carbs = (double?)(nutrients["CHOCDF"] ?? 0) ?? 0,
-                        Protein = (double?)(nutrients["PROCNT"] ?? 0) ?? 0,
-                        TotalWeight = (double?)(first["measure"]?["weight"] ?? 0) ?? 0
-                    };
-                    return info;
-                }
+                string error = await response.Content.ReadAsStringAsync();
+                throw new Exception($"Chyba při získávání tokenu: {response.StatusCode}\n{error}");
             }
 
-            return null;
+            var json = await response.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(json);
+            return doc.RootElement.GetProperty("access_token").GetString();
+        }
+
+        
+        public async Task<string> GetFoodInfoAsync(int foodId)
+        {
+            var token = await GetAccessTokenAsync();
+
+            var requestUrl = $"https://platform.fatsecret.com/rest/food/v5?food_id={foodId}&format=json";
+            var request = new HttpRequestMessage(HttpMethod.Get, requestUrl);
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+            var response = await _httpClient.SendAsync(request);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                string error = await response.Content.ReadAsStringAsync();
+                throw new Exception($"Chyba při získávání dat o jídle: {response.StatusCode}\n{error}");
+            }
+
+            return await response.Content.ReadAsStringAsync();
         }
     }
 }
